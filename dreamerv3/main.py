@@ -37,7 +37,7 @@ def main(argv=None):
   logdir = elements.Path(config.logdir)
   print('Logdir:', logdir)
   print('Run script:', config.script)
-  if not config.script.endswith(('_env', '_replay')):
+  if not config.script.endswith(('_env', '_envs', '_replay')):
     logdir.mkdir()
     config.save(logdir / 'config.yaml')
 
@@ -109,7 +109,6 @@ def main(argv=None):
         bind(make_env, config), config.replica, args, is_eval)
 
   elif config.script == 'parallel_envs':
-    is_eval = config.replica >= args.envs
     embodied.run.parallel.parallel_envs(
         bind(make_env, config), bind(make_env, config), args)
 
@@ -198,13 +197,17 @@ def make_replay(config, folder, mode='train'):
     assert config.jax.compute_dtype in ('bfloat16', 'float32'), (
         'Gradient scaling for low-precision training can produce invalid loss '
         'outputs that are incompatible with prioritized replay.')
-    recency = 1.0 / np.arange(1, capacity + 1) ** config.replay.recexp
     selectors = embodied.replay.selectors
-    kwargs['selector'] = selectors.Mixture(dict(
-        uniform=selectors.Uniform(),
-        priority=selectors.Prioritized(**config.replay.prio),
-        recency=selectors.Recency(recency),
-    ), config.replay.fracs)
+    chs = {}
+    if config.replay.fracs.uniform > 0:
+      chs['uniform'] = selectors.Uniform()
+    if config.replay.fracs.priority > 0:
+      chs['priority'] = selectors.Prioritized(**config.replay.prio)
+    if config.replay.fracs.recency > 0:
+      recency = 1.0 / np.arange(1, capacity + 1) ** config.replay.recexp
+      chs['recency'] = selectors.Recency(recency)
+    fracs = {k: v for k, v in config.replay.fracs.items() if v > 0}
+    kwargs['selector'] = selectors.Mixture(chs, fracs)
 
   return embodied.replay.Replay(**kwargs)
 
@@ -217,7 +220,7 @@ def make_env(config, index, **overrides):
   ctor = {
       'dummy': 'embodied.envs.dummy:Dummy',
       'gym': 'embodied.envs.from_gym:FromGym',
-      'dm': 'embodied.envs.from_dmenv:FromDM',
+      'dm': 'embodied.envs.from_dm:FromDM',
       'crafter': 'embodied.envs.crafter:Crafter',
       'dmc': 'embodied.envs.dmc:DMC',
       'atari': 'embodied.envs.atari:Atari',
@@ -236,10 +239,11 @@ def make_env(config, index, **overrides):
     module, cls = ctor.split(':')
     module = importlib.import_module(module)
     ctor = getattr(module, cls)
-  kwargs = config.env.get(suite, {})
+  kwargs = dict(config.env.get(suite, {}))
   kwargs.update(overrides)
   if kwargs.pop('use_seed', False):
-    kwargs['seed'] = hash((config.seed, index)) % (2 ** 32 - 1)
+    seed_seq = np.random.SeedSequence([int(config.seed), int(index)])
+    kwargs['seed'] = int(seed_seq.generate_state(1)[0]) % (2 ** 32 - 1)
   if kwargs.pop('use_logdir', False):
     kwargs['logdir'] = elements.Path(config.logdir) / f'env{index}'
   env = ctor(task, **kwargs)
