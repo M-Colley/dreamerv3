@@ -37,7 +37,7 @@ def main(argv=None):
   logdir = elements.Path(config.logdir)
   print('Logdir:', logdir)
   print('Run script:', config.script)
-  if not config.script.endswith(('_env', '_replay')):
+  if not config.script.endswith(('_env', '_envs', '_replay')):
     logdir.mkdir()
     config.save(logdir / 'config.yaml')
 
@@ -63,6 +63,7 @@ def main(argv=None):
       consec_train=config.consec_train,
       consec_report=config.consec_report,
       replay_context=config.replay_context,
+      seed=config.seed,
   )
 
   if config.script == 'train':
@@ -109,7 +110,6 @@ def main(argv=None):
         bind(make_env, config), config.replica, args, is_eval)
 
   elif config.script == 'parallel_envs':
-    is_eval = config.replica >= args.envs
     embodied.run.parallel.parallel_envs(
         bind(make_env, config), bind(make_env, config), args)
 
@@ -120,17 +120,30 @@ def main(argv=None):
         bind(make_stream, config),
         args)
 
+  elif config.script == 'train_mjx':
+    if config.jax.platform:
+      import jax
+      jax.config.update('jax_platforms', config.jax.platform)
+    embodied.run.train_mjx(
+        bind(make_agent, config),
+        bind(make_replay, config, 'replay'),
+        bind(make_mjx_env, config),
+        bind(make_stream, config),
+        bind(make_logger, config),
+        args)
+
   else:
     raise NotImplementedError(config.script)
 
 
-def make_agent(config):
+def make_agent(config, obs_space=None, act_space=None):
   from .agent import Agent
-  env = make_env(config, 0)
-  notlog = lambda k: not k.startswith('log/')
-  obs_space = {k: v for k, v in env.obs_space.items() if notlog(k)}
-  act_space = {k: v for k, v in env.act_space.items() if k != 'reset'}
-  env.close()
+  if obs_space is None or act_space is None:
+    env = make_env(config, 0)
+    notlog = lambda k: not k.startswith('log/')
+    obs_space = {k: v for k, v in env.obs_space.items() if notlog(k)}
+    act_space = {k: v for k, v in env.act_space.items() if k != 'reset'}
+    env.close()
   if config.random_agent:
     return embodied.RandomAgent(obs_space, act_space)
   cpdir = elements.Path(config.logdir)
@@ -198,13 +211,17 @@ def make_replay(config, folder, mode='train'):
     assert config.jax.compute_dtype in ('bfloat16', 'float32'), (
         'Gradient scaling for low-precision training can produce invalid loss '
         'outputs that are incompatible with prioritized replay.')
-    recency = 1.0 / np.arange(1, capacity + 1) ** config.replay.recexp
     selectors = embodied.replay.selectors
-    kwargs['selector'] = selectors.Mixture(dict(
-        uniform=selectors.Uniform(),
-        priority=selectors.Prioritized(**config.replay.prio),
-        recency=selectors.Recency(recency),
-    ), config.replay.fracs)
+    chs = {}
+    if config.replay.fracs.uniform > 0:
+      chs['uniform'] = selectors.Uniform()
+    if config.replay.fracs.priority > 0:
+      chs['priority'] = selectors.Prioritized(**config.replay.prio)
+    if config.replay.fracs.recency > 0:
+      recency = 1.0 / np.arange(1, capacity + 1) ** config.replay.recexp
+      chs['recency'] = selectors.Recency(recency)
+    fracs = {k: v for k, v in config.replay.fracs.items() if v > 0}
+    kwargs['selector'] = selectors.Mixture(chs, fracs)
 
   return embodied.replay.Replay(**kwargs)
 
@@ -217,7 +234,7 @@ def make_env(config, index, **overrides):
   ctor = {
       'dummy': 'embodied.envs.dummy:Dummy',
       'gym': 'embodied.envs.from_gym:FromGym',
-      'dm': 'embodied.envs.from_dmenv:FromDM',
+      'dm': 'embodied.envs.from_dm:FromDM',
       'crafter': 'embodied.envs.crafter:Crafter',
       'dmc': 'embodied.envs.dmc:DMC',
       'atari': 'embodied.envs.atari:Atari',
@@ -229,6 +246,7 @@ def make_env(config, index, **overrides):
       'langroom': 'embodied.envs.langroom:LangRoom',
       'procgen': 'embodied.envs.procgen:ProcGen',
       'bsuite': 'embodied.envs.bsuite:BSuite',
+      'myosuite': 'embodied.envs.myosuite:MyoSuite',
       'memmaze': lambda task, **kw: from_gym.FromGym(
           f'MemoryMaze-{task}-v0', **kw),
   }[suite]
@@ -236,10 +254,11 @@ def make_env(config, index, **overrides):
     module, cls = ctor.split(':')
     module = importlib.import_module(module)
     ctor = getattr(module, cls)
-  kwargs = config.env.get(suite, {})
+  kwargs = dict(config.env.get(suite, {}))
   kwargs.update(overrides)
   if kwargs.pop('use_seed', False):
-    kwargs['seed'] = hash((config.seed, index)) % (2 ** 32 - 1)
+    seed_seq = np.random.SeedSequence([int(config.seed), int(index)])
+    kwargs['seed'] = int(seed_seq.generate_state(1)[0]) % (2 ** 32 - 1)
   if kwargs.pop('use_logdir', False):
     kwargs['logdir'] = elements.Path(config.logdir) / f'env{index}'
   env = ctor(task, **kwargs)
@@ -256,6 +275,30 @@ def wrap_env(env, config):
     if not space.discrete:
       env = embodied.wrappers.ClipAction(env, name)
   return env
+
+
+def make_mjx_env(config):
+  suite, task = config.task.split('_', 1)
+  overrides = dict(config.env.get(suite, {}))
+  overrides['num_envs'] = int(config.run.envs)
+  if suite == 'myomjx':
+    from embodied.envs.myosuite import _import_myosuite
+    _import_myosuite()
+    try:
+      from myosuite.envs.myo.backends import mjx as myo_mjx
+      cfg = myo_mjx.get_default_config(task)
+      if hasattr(cfg, 'mjx_impl') and 'impl' in overrides:
+        impl = overrides.pop('impl')
+        overrides['mjx_impl'] = None if impl in ('jax', '', None) else impl
+      return myo_mjx.make(task, config_overrides=overrides)
+    except ImportError:
+      from myosuite.envs.myo.mjx import make as mjx_make
+      return mjx_make(task, config_overrides=overrides)
+  elif suite == 'playground':
+    from mujoco_playground import registry
+    return registry.load(task, config_overrides=overrides)
+  else:
+    raise NotImplementedError(suite)
 
 
 def make_stream(config, replay, mode):

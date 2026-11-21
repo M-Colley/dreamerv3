@@ -122,14 +122,16 @@ class RSSM(nj.Module):
     carry, entries, feat = self.observe(carry, tokens, acts, reset, training)
     prior = self._prior(feat['deter'])
     post = feat['logit']
-    dyn = self._dist(sg(post)).kl(self._dist(prior))
-    rep = self._dist(post).kl(self._dist(sg(prior)))
+    prior_dist = self._dist(prior)
+    post_dist = self._dist(post)
+    dyn = self._dist(sg(post)).kl(prior_dist)
+    rep = post_dist.kl(self._dist(sg(prior)))
     if self.free_nats:
       dyn = jnp.maximum(dyn, self.free_nats)
       rep = jnp.maximum(rep, self.free_nats)
     losses = {'dyn': dyn, 'rep': rep}
-    metrics['dyn_ent'] = self._dist(prior).entropy().mean()
-    metrics['rep_ent'] = self._dist(post).entropy().mean()
+    metrics['dyn_ent'] = prior_dist.entropy().mean()
+    metrics['rep_ent'] = post_dist.entropy().mean()
     return carry, entries, losses, feat, metrics
 
   def _core(self, deter, stoch, action):
@@ -144,7 +146,8 @@ class RSSM(nj.Module):
     x1 = nn.act(self.act)(self.sub('dynin1norm', nn.Norm, self.norm)(x1))
     x2 = self.sub('dynin2', nn.Linear, self.hidden, **self.kw)(action)
     x2 = nn.act(self.act)(self.sub('dynin2norm', nn.Norm, self.norm)(x2))
-    x = jnp.concatenate([x0, x1, x2], -1)[..., None, :].repeat(g, -2)
+    x = jnp.concatenate([x0, x1, x2], -1)
+    x = jnp.broadcast_to(x[..., None, :], (*x.shape[:-1], g, x.shape[-1]))
     x = group2flat(jnp.concatenate([flat2group(deter), x], -1))
     for i in range(self.dynlayers):
       x = self.sub(f'dynhid{i}', nn.BlockLinear, self.deter, g, **self.kw)(x)
@@ -286,7 +289,7 @@ class Decoder(nj.Module):
     return {}
 
   def __call__(self, carry, feat, reset, training, single=False):
-    assert feat['deter'].shape[-1] % self.bspace == 0
+    assert not self.bspace or feat['deter'].shape[-1] % self.bspace == 0
     K = self.kernel
     recons = {}
     bshape = reset.shape
@@ -326,7 +329,7 @@ class Decoder(nj.Module):
         x1 = self.sub('sp2', nn.Linear, shape, **self.kw)(x1)
         x = nn.act(self.act)(self.sub('spnorm', nn.Norm, self.norm)(x0 + x1))
       else:
-        x = self.sub('space', nn.Linear, shape, **kw)(inp)
+        x = self.sub('space', nn.Linear, shape, **self.kw)(inp)
         x = nn.act(self.act)(self.sub('spacenorm', nn.Norm, self.norm)(x))
       for i, depth in reversed(list(enumerate(self.depths[:-1]))):
         if self.strided:
