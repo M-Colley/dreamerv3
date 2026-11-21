@@ -1,3 +1,5 @@
+import collections.abc
+
 import elements
 import numpy as np
 
@@ -40,10 +42,11 @@ class MJXDriver:
       self.max_episode_steps = int(max_episode_steps)
 
       sample_state = self.env.reset(jax.random.PRNGKey(int(seed)))
-      self._obs_is_dict = isinstance(sample_state.obs, dict)
+      self._obs_is_dict = isinstance(sample_state.obs, collections.abc.Mapping)
       self._metric_keys = (
           sorted(sample_state.metrics.keys())
-          if self.log_metrics and isinstance(sample_state.metrics, dict)
+          if self.log_metrics and isinstance(
+              sample_state.metrics, collections.abc.Mapping)
           else []
       )
 

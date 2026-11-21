@@ -284,8 +284,16 @@ def make_mjx_env(config):
   if suite == 'myomjx':
     from embodied.envs.myosuite import _import_myosuite
     _import_myosuite()
-    from myosuite.envs.myo.mjx import make as mjx_make
-    return mjx_make(task, config_overrides=overrides)
+    try:
+      from myosuite.envs.myo.backends import mjx as myo_mjx
+      cfg = myo_mjx.get_default_config(task)
+      if hasattr(cfg, 'mjx_impl') and 'impl' in overrides:
+        impl = overrides.pop('impl')
+        overrides['mjx_impl'] = None if impl in ('jax', '', None) else impl
+      return myo_mjx.make(task, config_overrides=overrides)
+    except ImportError:
+      from myosuite.envs.myo.mjx import make as mjx_make
+      return mjx_make(task, config_overrides=overrides)
   elif suite == 'playground':
     from mujoco_playground import registry
     return registry.load(task, config_overrides=overrides)

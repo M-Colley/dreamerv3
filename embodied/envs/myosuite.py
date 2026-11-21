@@ -42,7 +42,7 @@ class MyoSuite(embodied.Env):
       **kwargs,
   ):
     assert proprio or image, 'At least one of proprio or image must be True.'
-    _import_myosuite()
+    myosuite = _import_myosuite()
     from myosuite.utils import gym
 
     registry = getattr(gym.envs, 'registry', {})
@@ -50,7 +50,10 @@ class MyoSuite(embodied.Env):
       task = f'myo{task}'
 
     self._task = task
-    self._env = gym.make(task, **kwargs)
+    if hasattr(myosuite, 'make_env'):
+      self._env = myosuite.make_env(task, **kwargs)
+    else:
+      self._env = gym.make(task, **kwargs)
     self._repeat = int(repeat)
     self._proprio = bool(proprio)
     self._image = bool(image)
@@ -59,6 +62,7 @@ class MyoSuite(embodied.Env):
     self._camera = camera if camera not in (-1, '') else None
     self._device_id = int(device_id)
     self._seed = seed
+    self._renderer = None
     self._done = True
 
   @property
@@ -181,11 +185,25 @@ class MyoSuite(embodied.Env):
       if self._camera is not None:
         kw['camera_id'] = self._camera
       frame = unwrapped.sim.renderer.render_offscreen(**kw)
+    elif hasattr(unwrapped, 'model') and hasattr(unwrapped, 'data'):
+      import mujoco
+      if self._renderer is None:
+        self._renderer = mujoco.Renderer(
+            unwrapped.model, height=height, width=width)
+      cam = -1 if self._camera is None else self._camera
+      self._renderer.update_scene(unwrapped.data, camera=cam)
+      frame = self._renderer.render()
     else:
       frame = self._env.render()
     return np.asarray(frame, np.uint8)
 
   def close(self):
+    if self._renderer is not None:
+      try:
+        self._renderer.close()
+      except Exception:
+        pass
+      self._renderer = None
     try:
       unwrapped = self._env.unwrapped
       if hasattr(unwrapped, 'mj_renderer') and hasattr(
