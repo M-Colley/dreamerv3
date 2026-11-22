@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  smoke:
+    name: Smoke (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+      - name: Install package and test dependencies
+        run: |
+          uv venv --python ${{ matrix.python-version }} .venv
+          uv pip install --python .venv/bin/python -e . pytest gymnasium
+      - name: Report resolved versions
+        run: |
+          .venv/bin/python -c "import jax, numpy, optax, gymnasium; print('numpy:', numpy.__version__, 'jax:', jax.__version__, 'optax:', optax.__version__, 'gymnasium:', gymnasium.__version__)"
+      - name: Run unit and world-model smoke tests
+        run: .venv/bin/pytest tests/test_smoke.py -v
