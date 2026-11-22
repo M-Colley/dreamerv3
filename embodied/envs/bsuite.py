@@ -10,7 +10,8 @@ class BSuite(embodied.Env):
     print(
         'Warning: BSuite result logging is stateful and therefore training ' +
         'runs cannot be interrupted or restarted.')
-    np.int = int  # Patch deprecated Numpy alias used inside BSuite.
+    if not hasattr(np, 'int'):
+      np.int = int  # Patch deprecated Numpy alias used inside BSuite.
     from . import from_dm
     if '/' not in task:
       task = f'{task}/0'
@@ -20,8 +21,7 @@ class BSuite(embodied.Env):
     self.max_episodes = env.bsuite_num_episodes
     self.exit_after = None
     env = from_dm.FromDM(env)
-    env = embodied.wrappers.ForceDtypes(env)
-    env = embodied.wrappers.FlattenTwoDimObs(env)
+    env = embodied.wrappers.UnifyDtypes(env)
     self.env = env
 
   @property
@@ -43,7 +43,7 @@ class BSuite(embodied.Env):
       if not self.exit_after:
         self.exit_after = time.time() + 600
       if time.time() > self.exit_after:
-        if self.xm:
+        if getattr(self, 'xm', None):
           wu = self.xm.get_current_work_unit()
           wu.stop(mark_as_completed=True, message='BSuite run complete')
         else:

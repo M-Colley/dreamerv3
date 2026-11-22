@@ -57,20 +57,21 @@ class Chunk:
     for key, value in mapping.items():
       self.data[key][index: index + length] = value
 
-  def slice(self, index, length):
+  def slice(self, index, length, keys=None):
     assert 0 <= index and index + length <= self.length
-    return {k: v[index: index + length] for k, v in self.data.items()}
+    return {
+        k: self.data[k][index: index + length]
+        for k in (keys or self.data.keys())}
 
   @elements.timer.section('chunk_save')
   def save(self, directory, log=False):
     assert not self.saved
-    self.saved = True
     filename = elements.Path(directory) / self.filename
     data = {k: v[:self.length] for k, v in self.data.items()}
     with io.BytesIO() as stream:
       np.savez_compressed(stream, **data)
-      stream.seek(0)
-      filename.write(stream.read(), mode='wb')
+      filename.write(stream.getvalue(), mode='wb')
+    self.saved = True
     log and print(f'Saved chunk: {filename.name}')
 
   @classmethod
@@ -80,8 +81,8 @@ class Chunk:
     length = int(length)
     try:
       with elements.Path(filename).open('rb') as f:
-        data = np.load(f)
-        data = {k: data[k] for k in data.keys()}
+        with np.load(f) as npz:
+          data = {k: npz[k] for k in npz.keys()}
     except Exception:
       tb = ''.join(traceback.format_exception(sys.exception()))
       print(f'Error loading chunk {filename}:\n{tb}')
